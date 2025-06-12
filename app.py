@@ -1,49 +1,90 @@
 from flask import Flask, request, send_file, jsonify
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import openai
 import tempfile
 import os
 
-# Use API key from environment variable
+# Use OpenAI key from environment variable
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 
 app = Flask(__name__)
 
-def generate_docx_from_text(text, filename):
-    doc = Document()
-    doc.add_heading("Generated Document", level=1).alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph("Styled and structured with AI.\n")
+def gpt_generate_structure(user_text):
+    system_message = {
+        "role": "system",
+        "content": "You return structured JSON with a document title, and a list of sections. Each section must have a heading and either content or bullet points."
+    }
 
-    for paragraph in text.split("\n"):
-        if paragraph.strip():
-            p = doc.add_paragraph(paragraph.strip())
-            p.style.font.size = Pt(11)
-            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-
-    doc.save(filename)
-    return filename
-
-def gpt_format_text(user_text):
-    prompt = f"""
-You are a professional writing assistant. Take the following raw text and transform it into a polished, structured document with headings, bullet points (if needed), and clean formatting.
+    user_message = {
+        "role": "user",
+        "content": f"""
+Format this raw text into a structured JSON object like:
+{{
+  "title": "Document Title",
+  "sections": [
+    {{
+      "heading": "Introduction",
+      "content": "Some paragraph."
+    }},
+    {{
+      "heading": "Features",
+      "bullets": ["Point 1", "Point 2"]
+    }}
+  ]
+}}
 
 Text:
 \"\"\"{user_text}\"\"\"
 """
+    }
 
-    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client = openai.OpenAI(api_key=openai.api_key)
     response = client.chat.completions.create(
         model="gpt-4",
-        messages=[
-            { "role": "system", "content": "You generate polished, structured business documents." },
-            { "role": "user", "content": prompt }
-        ],
-        temperature=0.7
+        messages=[system_message, user_message],
+        response_format="json"
     )
-
     return response.choices[0].message.content.strip()
+
+def generate_styled_docx(structured, filename):
+    import json
+    data = json.loads(structured)
+    doc = Document()
+
+    # Set title style
+    title = doc.add_heading(data.get("title", "Untitled Document"), level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.runs[0]
+    run.font.size = Pt(26)
+    run.font.color.rgb = RGBColor(0, 102, 204)
+
+    doc.add_paragraph("")  # Spacer
+
+    for section in data.get("sections", []):
+        heading = doc.add_heading(section["heading"], level=1)
+        heading.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
+
+        if "content" in section:
+            para = doc.add_paragraph(section["content"])
+            para.runs[0].font.size = Pt(11)
+        elif "bullets" in section:
+            for item in section["bullets"]:
+                doc.add_paragraph(item, style='List Bullet')
+
+        doc.add_paragraph("")  # Spacer between sections
+
+    # Add footer/pagination
+    section = doc.sections[0]
+    footer = section.footer
+    footer_para = footer.paragraphs[0]
+    footer_para.text = "Page "
+    footer_para.add_run().add_field("PAGE")
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    doc.save(filename)
+    return filename
 
 @app.route('/generate-docx', methods=['POST'])
 def generate_docx():
@@ -52,18 +93,18 @@ def generate_docx():
         return jsonify({"error": "Missing 'text' in request body"}), 400
 
     try:
-        ai_text = gpt_format_text(data['text'])
+        structured_json = gpt_generate_structure(data['text'])
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            output_path = generate_docx_from_text(ai_text, tmp.name)
-            return send_file(output_path, as_attachment=True, download_name="document.docx")
+            output_path = generate_styled_docx(structured_json, tmp.name)
+            return send_file(output_path, as_attachment=True, download_name="ai-styled.docx")
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def home():
-    return '👋 Welcome to the AI DOCX Generator API!'
+    return '📄 AI-Styled DOCX Generator API is running!'
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
