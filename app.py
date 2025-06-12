@@ -1,87 +1,89 @@
 from flask import Flask, request, send_file, jsonify
+from openai import OpenAI
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-import openai
-import tempfile
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 import os
-
-# Use OpenAI key from environment variable
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+import tempfile
 
 app = Flask(__name__)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def gpt_generate_structure(user_text):
-    system_message = {
-        "role": "system",
-        "content": "You return structured JSON with a document title, and a list of sections. Each section must have a heading and either content or bullet points."
-    }
-
-    user_message = {
-        "role": "user",
-        "content": f"""
-Format this raw text into a structured JSON object like:
-{{
-  "title": "Document Title",
-  "sections": [
-    {{
-      "heading": "Introduction",
-      "content": "Some paragraph."
-    }},
-    {{
-      "heading": "Features",
-      "bullets": ["Point 1", "Point 2"]
-    }}
-  ]
-}}
-
-Text:
-\"\"\"{user_text}\"\"\"
-"""
-    }
-
-    client = openai.OpenAI(api_key=openai.api_key)
+# === Format with OpenAI (structure only, visual will be handled below) ===
+def gpt_format_text(user_text):
+    messages = [
+        {"role": "system", "content": "You are a professional document formatter who rewrites content using clear structure with headings, bullets, and sections."},
+        {"role": "user", "content": f"Format this into a business document:\n\"\"\"\n{user_text}\n\"\"\""}
+    ]
     response = client.chat.completions.create(
         model="gpt-4",
-        messages=[system_message, user_message],
-        response_format="json"
+        messages=messages,
+        temperature=0.6
     )
     return response.choices[0].message.content.strip()
 
-def generate_styled_docx(structured, filename):
-    import json
-    data = json.loads(structured)
+# === Add page numbers ===
+def add_footer_with_page_number(section):
+    footer = section.footer
+    paragraph = footer.paragraphs[0]
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run()
+    fldChar1 = OxmlElement('w:fldChar')
+    fldChar1.set(qn('w:fldCharType'), 'begin')
+    instrText = OxmlElement('w:instrText')
+    instrText.text = 'PAGE'
+    fldChar2 = OxmlElement('w:fldChar')
+    fldChar2.set(qn('w:fldCharType'), 'end')
+    run._r.append(fldChar1)
+    run._r.append(instrText)
+    run._r.append(fldChar2)
+
+# === Convert Text to Beautiful DOCX ===
+def generate_docx_from_text(text, filename):
     doc = Document()
 
-    # Set title style
-    title = doc.add_heading(data.get("title", "Untitled Document"), level=0)
+    # Set margins
+    section = doc.sections[0]
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    section.left_margin = Inches(1)
+    section.right_margin = Inches(1)
+
+    # Add Title
+    title = doc.add_heading("AI Generated Report", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = title.runs[0]
-    run.font.size = Pt(26)
-    run.font.color.rgb = RGBColor(0, 102, 204)
+    run.font.color.rgb = RGBColor(0x2E, 0x74, 0xB5)  # Blue
+    run.font.size = Pt(20)
+
+    # Subtitle
+    subtitle = doc.add_paragraph("Document generated and formatted using OpenAI & Python")
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle_run = subtitle.runs[0]
+    subtitle_run.font.size = Pt(12)
+    subtitle_run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)  # Gray
 
     doc.add_paragraph("")  # Spacer
 
-    for section in data.get("sections", []):
-        heading = doc.add_heading(section["heading"], level=1)
-        heading.runs[0].font.color.rgb = RGBColor(255, 140, 0)  # Orange
+    # Main Content Formatting
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            p = doc.add_heading(stripped[2:], level=1)
+            p.runs[0].font.color.rgb = RGBColor(0x00, 0x00, 0x80)
+        elif stripped.startswith("## "):
+            p = doc.add_heading(stripped[3:], level=2)
+            p.runs[0].font.color.rgb = RGBColor(0x33, 0x66, 0x99)
+        elif stripped.startswith("- "):
+            p = doc.add_paragraph(stripped[2:], style='List Bullet')
+        elif stripped:
+            para = doc.add_paragraph(stripped)
+            para.style.font.size = Pt(11)
 
-        if "content" in section:
-            para = doc.add_paragraph(section["content"])
-            para.runs[0].font.size = Pt(11)
-        elif "bullets" in section:
-            for item in section["bullets"]:
-                doc.add_paragraph(item, style='List Bullet')
-
-        doc.add_paragraph("")  # Spacer between sections
-
-    # Add footer/pagination
-    section = doc.sections[0]
-    footer = section.footer
-    footer_para = footer.paragraphs[0]
-    footer_para.text = "Page "
-    footer_para.add_run().add_field("PAGE")
-    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Add page numbers
+    add_footer_with_page_number(section)
 
     doc.save(filename)
     return filename
@@ -93,18 +95,19 @@ def generate_docx():
         return jsonify({"error": "Missing 'text' in request body"}), 400
 
     try:
-        structured_json = gpt_generate_structure(data['text'])
+        ai_text = gpt_format_text(data['text'])
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            output_path = generate_styled_docx(structured_json, tmp.name)
-            return send_file(output_path, as_attachment=True, download_name="ai-styled.docx")
+            output_path = generate_docx_from_text(ai_text, tmp.name)
+            return send_file(output_path, as_attachment=True, download_name="beautiful_doc.docx",
+                             mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def home():
-    return '📄 AI-Styled DOCX Generator API is running!'
+    return '👋 Welcome to the Beautiful DOCX Generator API!'
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
