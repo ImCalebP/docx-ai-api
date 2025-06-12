@@ -4,14 +4,14 @@ from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import openai, os, tempfile
+import openai, os, tempfile, re
 
 # ── OpenAI key (set on Render) ────────────────────────────────────────────────
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = Flask(__name__)
 
-# ── GPT: return Markdown-style structure (NO response_format arg!) ────────────
+# ── GPT: return Markdown-style structure ─────────────────────────────────────
 def gpt_markdown(raw_text: str) -> str:
     sys_msg = (
         "You return structured Markdown. Use:\n"
@@ -30,12 +30,11 @@ def gpt_markdown(raw_text: str) -> str:
     )
     return res.choices[0].message.content.strip()
 
-# ── DOCX helpers ──────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 def _add_page_numbers(section):
     footer_p = section.footer.paragraphs[0]
     footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = footer_p.add_run()
-    # Insert PAGE field
     fld_begin = OxmlElement('w:fldChar'); fld_begin.set(qn('w:fldCharType'), 'begin')
     instr     = OxmlElement('w:instrText'); instr.text = " PAGE "
     fld_end   = OxmlElement('w:fldChar');  fld_end.set(qn('w:fldCharType'), 'end')
@@ -71,6 +70,19 @@ def markdown_to_docx(md: str, filename: str):
 
     doc.save(filename)
 
+def extract_title(md: str) -> str:
+    """Return first '# Title' line or fallback"""
+    for line in md.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return "ai_document"
+
+def safe_filename(title: str) -> str:
+    """Sanitise title → safe file name"""
+    cleaned = re.sub(r'[^A-Za-z0-9 _-]', '', title)      # drop weird chars
+    cleaned = cleaned.strip().replace(" ", "_")           # spaces → _
+    return (cleaned[:50] or "ai_document") + ".docx"      # max 50 chars
+
 # ── Flask route ───────────────────────────────────────────────────────────────
 @app.route("/generate-docx", methods=["POST"])
 def generate_docx():
@@ -78,13 +90,16 @@ def generate_docx():
     if not data or "text" not in data:
         return jsonify({"error": "JSON body must contain 'text'"}), 400
     try:
-        md = gpt_markdown(data["text"])
+        md       = gpt_markdown(data["text"])
+        title    = extract_title(md)
+        filename = safe_filename(title)
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
             markdown_to_docx(md, tmp.name)
             return send_file(
                 tmp.name,
                 as_attachment=True,
-                download_name="ai_document.docx",
+                download_name=filename,
                 mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
     except Exception as e:
