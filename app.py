@@ -1,117 +1,98 @@
 from flask import Flask, request, send_file, jsonify
 from docx import Document
-from docx.shared import Pt, RGBColor, Inches
+from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import openai
-import os
-import tempfile
+import openai, os, tempfile
 
-# ── Flask setup ────────────────────────────────────────────────────────────────
+# ── OpenAI key (set on Render) ────────────────────────────────────────────────
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 app = Flask(__name__)
 
-# ── OpenAI setup ───────────────────────────────────────────────────────────────
-openai.api_key = os.getenv("OPENAI_API_KEY")   # <-- Set this in Render dashboard
-
-# ── GPT: return structured Markdown (no visual styling) ───────────────────────
-def gpt_format_text(raw_text: str) -> str:
-    system_prompt = (
-        "You are a professional technical writer. "
-        "Rewrite input text with clear Markdown headers (#, ##, ###), bullet lists (- item) "
-        "and short paragraphs."
+# ── GPT: return Markdown-style structure (NO response_format arg!) ────────────
+def gpt_markdown(raw_text: str) -> str:
+    sys_msg = (
+        "You return structured Markdown. Use:\n"
+        "- # Title (once)\n"
+        "- ## Section headings\n"
+        "- Bullets starting with '- '\n"
+        "- Short paragraphs\n"
+        "Do NOT wrap in code-blocks."
     )
-    user_prompt = f"Format the following into structured Markdown:\n\n\"\"\"\n{raw_text}\n\"\"\""
-    response = openai.chat.completions.create(
+    usr_msg = f"Format the following:\n\n\"\"\"\n{raw_text}\n\"\"\""
+    res = openai.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "system", "content": system_prompt},
-                  {"role": "user", "content": user_prompt}],
+        messages=[{"role": "system", "content": sys_msg},
+                  {"role": "user",    "content": usr_msg}],
         temperature=0.5,
     )
-    return response.choices[0].message.content.strip()
+    return res.choices[0].message.content.strip()
 
-# ── DOCX helpers ───────────────────────────────────────────────────────────────
-def add_page_numbers(section):
-    """Center-aligned footer with automatic PAGE field."""
-    footer_para = section.footer.paragraphs[0]
-    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = footer_para.add_run()
-
-    # Field code: PAGE
+# ── DOCX helpers ──────────────────────────────────────────────────────────────
+def _add_page_numbers(section):
+    footer_p = section.footer.paragraphs[0]
+    footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = footer_p.add_run()
+    # Insert PAGE field
     fld_begin = OxmlElement('w:fldChar'); fld_begin.set(qn('w:fldCharType'), 'begin')
-    instr = OxmlElement('w:instrText');   instr.text = ' PAGE '
-    fld_end  = OxmlElement('w:fldChar');  fld_end.set(qn('w:fldCharType'), 'end')
+    instr     = OxmlElement('w:instrText'); instr.text = " PAGE "
+    fld_end   = OxmlElement('w:fldChar');  fld_end.set(qn('w:fldCharType'), 'end')
+    run._r.extend((fld_begin, instr, fld_end))
 
-    run._r.append(fld_begin)
-    run._r.append(instr)
-    run._r.append(fld_end)
-
-def generate_docx(markdown_text: str, filename: str) -> str:
+def markdown_to_docx(md: str, filename: str):
     doc = Document()
+    sec = doc.sections[0]
+    sec.top_margin = sec.bottom_margin = Inches(1)
+    sec.left_margin = sec.right_margin = Inches(1)
+    _add_page_numbers(sec)
 
-    # Page margins
-    sect = doc.sections[0]
-    sect.top_margin    = sect.bottom_margin = Inches(1)
-    sect.left_margin   = sect.right_margin  = Inches(1)
-    add_page_numbers(sect)
-
-    # Title (first line with single '#')
-    lines = markdown_text.splitlines()
+    lines = md.splitlines()
     if lines and lines[0].startswith("# "):
-        title_text = lines.pop(0)[2:].strip()
-        title = doc.add_heading(title_text, level=0)
+        title = doc.add_heading(lines.pop(0)[2:].strip(), level=0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         title.runs[0].font.size = Pt(22)
-        title.runs[0].font.color.rgb = RGBColor(0x2E, 0x74, 0xB5)  # blue
-        doc.add_paragraph("")  # spacer
+        title.runs[0].font.color.rgb = RGBColor(0x2E, 0x74, 0xB5)
+        doc.add_paragraph("")
 
-    for line in lines:
-        stripped = line.strip()
-
-        # Headings
-        if stripped.startswith("## "):
-            h = doc.add_heading(stripped[3:], level=1)
-            h.runs[0].font.color.rgb = RGBColor(0x00, 0x57, 0xA6)  # darker blue
-        elif stripped.startswith("### "):
-            h = doc.add_heading(stripped[4:], level=2)
+    for ln in lines:
+        ln = ln.strip()
+        if ln.startswith("## "):
+            h = doc.add_heading(ln[3:], level=1)
             h.runs[0].font.color.rgb = RGBColor(0x00, 0x57, 0xA6)
-        # Bullets
-        elif stripped.startswith("- "):
-            doc.add_paragraph(stripped[2:], style='List Bullet')
-        # Blank line ⇒ extra spacing
-        elif stripped == "":
+        elif ln.startswith("- "):
+            doc.add_paragraph(ln[2:], style="List Bullet")
+        elif ln == "":
             doc.add_paragraph("")
-        # Normal paragraph
         else:
-            p = doc.add_paragraph(stripped)
+            p = doc.add_paragraph(ln)
             p.style.font.size = Pt(11)
 
     doc.save(filename)
-    return filename
 
-# ── Route ──────────────────────────────────────────────────────────────────────
+# ── Flask route ───────────────────────────────────────────────────────────────
 @app.route("/generate-docx", methods=["POST"])
-def generate_docx_endpoint():
+def generate_docx():
     data = request.get_json(silent=True)
     if not data or "text" not in data:
-        return jsonify({"error": "Provide JSON with a 'text' field"}), 400
-
+        return jsonify({"error": "JSON body must contain 'text'"}), 400
     try:
-        markdown = gpt_format_text(data["text"])
+        md = gpt_markdown(data["text"])
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            generate_docx(markdown, tmp.name)
+            markdown_to_docx(md, tmp.name)
             return send_file(
                 tmp.name,
                 as_attachment=True,
                 download_name="ai_document.docx",
                 mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/")
-def health():
-    return "✅ DOCX API is up"
+def root():
+    return "✅ DOCX API running"
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
