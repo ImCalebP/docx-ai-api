@@ -6,10 +6,10 @@ import openai
 import tempfile
 import os
 
-app = Flask(__name__)
-
-# 🔒 Read OpenAI API key from environment variable
+# Use API key from environment variable
 openai.api_key = os.environ.get("OPENAI_API_KEY")
+
+app = Flask(__name__)
 
 def generate_docx_from_text(text, filename):
     doc = Document()
@@ -33,7 +33,8 @@ Text:
 \"\"\"{user_text}\"\"\"
 """
 
-    response = openai.ChatCompletion.create(
+    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    response = client.chat.completions.create(
         model="gpt-4",
         messages=[
             { "role": "system", "content": "You generate polished, structured business documents." },
